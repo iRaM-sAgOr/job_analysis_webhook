@@ -64,6 +64,8 @@ job-analysis-fastapi
 3. **Install Dependencies**
    ```bash
    pip install -r requirements.txt
+   or
+   uv add -r requirements.txt
    ```
 
 4. **Environment Variables**
@@ -71,7 +73,7 @@ job-analysis-fastapi
 
 5. **Run the Application**
    ```bash
-   uvicorn app.main:app --reload
+   uv run fastapi dev app/main.py
    ```
 
 ## Usage
@@ -84,6 +86,77 @@ job-analysis-fastapi
   pytest
   ```
 
+
+Step 1: Understand the Signature Process
+Webhook signatures typically work like this:
+
+Create your JSON payload
+Generate HMAC-SHA256 hash using a secret key
+Send the signature in a specific header
+
+Step 2: Manual Preparation Methods
+Option A: Using Python Script
+   Create a helper script to generate the signature:
+
+```bash
+import hmac
+import hashlib
+import json
+
+# Your webhook secret (get this from your application config)
+WEBHOOK_SECRET = "your-webhook-secret-key"
+
+# Your payload
+payload = {
+    "job_id": "test-job-123",
+    "url": "https://example.com/job-posting",
+    "async_processing": True,
+    "callback_url": "https://your-callback-url.com/webhook"
+}
+
+# Convert to JSON string
+payload_json = json.dumps(payload, separators=(',', ':'))
+print(f"Payload: {payload_json}")
+
+# Generate signature
+signature = hmac.new(
+    WEBHOOK_SECRET.encode('utf-8'),
+    payload_json.encode('utf-8'),
+    hashlib.sha256
+).hexdigest()
+
+print(f"Signature: sha256={signature}")
+print(f"Full header value: sha256={signature}")
+```
+
+Option B: Using curl with OpenSSL
+````bash
+# Set your variables
+WEBHOOK_SECRET="your-webhook-secret-key"
+PAYLOAD='{"job_id":"test-job-123","url":"https://example.com/job-posting","async_processing":true,"callback_url":"https://your-callback-url.com/webhook"}'
+
+# Generate signature
+SIGNATURE=$(echo -n "$PAYLOAD" | openssl dgst -sha256 -hmac "$WEBHOOK_SECRET" | sed 's/^.* //')
+
+# Make the request
+curl -X POST "http://localhost:8000/api/v1/webhooks/job-analysis" \
+  -H "Content-Type: application/json" \
+  -H "X-Hub-Signature-256: sha256=$SIGNATURE" \
+  -d "$PAYLOAD"
+```
+
+Step 4: Complete cURL Example
+```
+curl -X POST "http://localhost:8000/api/v1/webhooks/job-analysis" \
+  -H "Content-Type: application/json" \
+  -H "X-Hub-Signature-256: sha256=YOUR_GENERATED_SIGNATURE" \
+  -d '{
+    "job_id": "test-job-123",
+    "url": "https://example.com/job-posting",
+    "async_processing": true,
+    "callback_url": "https://your-callback-url.com/webhook"
+  }'
+```
 ## Contributing
 Contributions are welcome! Please open an issue or submit a pull request for any improvements or bug fixes.
 

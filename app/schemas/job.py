@@ -2,7 +2,7 @@
 Pydantic schemas for job analysis data validation.
 Defines request/response models for API endpoints.
 """
-from pydantic import BaseModel, Field, validator
+from pydantic import BaseModel, Field, field_validator
 from typing import Dict, Any, Optional, List
 from datetime import datetime
 
@@ -48,16 +48,26 @@ class JobAnalysisWebhook(BaseModel):
     callback_url: Optional[str] = Field(
         None, description="Callback URL for results")
 
-    @validator('job_id')
+    @field_validator('job_id')
     def validate_job_id(cls, v):
         if not v or len(v.strip()) == 0:
             raise ValueError('job_id cannot be empty')
         return v.strip()
 
-    @validator('url')
+    @field_validator('url')
     def validate_url(cls, v):
-        if not v or not v.startswith("http"):
+        if not v or not v.startswith("https"):
             raise ValueError('A valid job post URL is required')
+        return v
+
+    @field_validator('callback_url')
+    def validate_callback_url(cls, v):
+        if v is not None:
+            if not v or len(v.strip()) == 0:
+                raise ValueError('callback_url cannot be empty')
+            if not v.strip().startswith("https"):
+                raise ValueError('callback_url must be a valid HTTPS URL')
+            return v.strip()
         return v
 
 

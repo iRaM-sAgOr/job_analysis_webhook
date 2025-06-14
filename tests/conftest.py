@@ -9,4 +9,3 @@ def test_client():
 
     client = TestClient(app)
     yield client  # This will be the test client for the tests
-```

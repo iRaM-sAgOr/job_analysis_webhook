@@ -2,54 +2,78 @@
 Webhook endpoints for job analysis processing.
 Handles incoming webhook requests and processes job data using LLM services.
 """
+from typing import Optional
 from fastapi import APIRouter, HTTPException, Depends, BackgroundTasks
 from app.schemas.job import JobAnalysisWebhook, JobAnalysisResponse
 from app.utils.logging import get_logger
 from app.middlewares.webhookSecurity import verify_webhook_signature_middleware
 from app.services.job_analyzer import MultiLLMJobAnalyzer
+from app.utils.llm_data_postprocessing import post_process_llm_output, send_webhook_callback
 from app.core.config import settings
-from app.utils.llm_data_postprocessing import post_process_llm_output
 
 # Initialize router and logger
 router = APIRouter()
 logger = get_logger(__name__)
 
 # Background processing function for job analysis
-def process_job_in_background(job_id: str, url: str, analyzer: MultiLLMJobAnalyzer):
+def process_job_in_background(job_id: str, url: str, analyzer: MultiLLMJobAnalyzer, callback_url: Optional[str] = None):
     try:
         scrapped_data = analyzer.scraper.scrape_url(url)
         if scrapped_data.get("success"):
             analyzed_content = analyzer.analyze_job_post(
                 scrapped_data["content"])
-            # Post-process the output for background tasks too
             processed_result = post_process_llm_output(analyzed_content)
-            print(f"Job analysis completed for job_id: {processed_result}")
+
+            logger.info(f"Job analysis completed for job_id: {job_id}")
+
+            # Send webhook callback if URL provided
+            if callback_url:
+                import asyncio
+                asyncio.create_task(send_webhook_callback(
+                    callback_url, job_id, processed_result, "completed"
+                ))
+            else:
+                print(f"Job analysis completed for job_id: {processed_result}")
         else:
             logger.error(f"Failed to scrape job data for job_id: {job_id}")
+            if callback_url:
+                import asyncio
+                asyncio.create_task(send_webhook_callback(
+                    callback_url, job_id, {}, "failed"
+                ))
     except Exception as e:
         logger.error(
             f"Background processing failed for job_id {job_id}: {str(e)}")
+        if callback_url:
+            import asyncio
+            asyncio.create_task(send_webhook_callback(
+                callback_url, job_id, {}, "error"
+            ))
 
 
 @router.post("/job-analysis", response_model=JobAnalysisResponse)
 async def job_analysis_webhook(
     webhook_data: JobAnalysisWebhook,
     background_tasks: BackgroundTasks,
-    # dependencies=Depends(verify_webhook_signature_middleware),
+    dependencies=Depends(verify_webhook_signature_middleware),
 ):
     """
     Process job analysis webhook requests.
 
-    Args:
-        webhook_data: Job analysis data from webhook
-        background_tasks: FastAPI background tasks for async processing
-        llm_service: Injected LLM service dependency
+    Request Body:
+
+        - job_id (str): Unique identifier for the job.
+        - url (str): URL of the job posting to analyze.
+        - async_processing (bool, optional): Whether to process asynchronously.
+        - callback_url (str, optional): URL to send callback after processing.
 
     Returns:
-        JobAnalysisResponse: Analysis results
+
+        JobAnalysisResponse: Analysis results.
 
     Raises:
-        HTTPException: For validation or processing errors
+    
+        HTTPException: For validation or processing errors.
     """
     try:
         logger.info(
@@ -62,14 +86,13 @@ async def job_analysis_webhook(
         )
 
         if webhook_data.async_processing:
-
             background_tasks.add_task(
                 process_job_in_background,
                 webhook_data.job_id,
                 webhook_data.url,
-                analyzer
+                analyzer,
+                webhook_data.callback_url  # Pass callback URL
             )
-            print("Yes, async processing enabled")
             return JobAnalysisResponse(
                 status="accepted",
                 job_id=webhook_data.job_id,

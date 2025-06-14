@@ -1,6 +1,8 @@
+from datetime import datetime
 import json
 import re
 from fastapi import HTTPException
+import httpx
 from app.utils.logging import get_logger
 
 logger = get_logger(__name__)
@@ -45,3 +47,27 @@ def post_process_llm_output(llm_output: str):
             status_code=500,
             detail=f"LLM did not return valid JSON: {str(e)}"
         )
+
+
+async def send_webhook_callback(callback_url: str, job_id: str, result: dict, status: str):
+    """Send analysis results to callback URL with JobAnalysisResponse structure"""
+    try:
+        # Create payload matching JobAnalysisResponse structure
+        payload = {
+            "status": status,
+            "job_id": job_id,
+            "result": result if status == "completed" else None,
+            "message": {
+                "completed": "Job analysis completed successfully",
+                "failed": "Failed to scrape job data",
+                "error": "Job analysis failed due to an error"
+            }.get(status, "Job analysis processed"),
+            "timestamp": datetime.utcnow().isoformat()
+        }
+
+        async with httpx.AsyncClient(timeout=30.0) as client:
+            response = await client.post(callback_url, json=payload)
+            response.raise_for_status()
+            logger.info(f"Webhook sent successfully for job_id: {job_id}")
+    except Exception as e:
+        logger.error(f"Failed to send webhook for job_id {job_id}: {str(e)}")
