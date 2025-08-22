@@ -1,7 +1,11 @@
 import pytest
 from unittest.mock import Mock, patch
 from fastapi.testclient import TestClient
+import json
+import hmac
+import hashlib
 from app.main import app
+from app.utils.llm_data_postprocessing import verify_callback_signature
 
 client = TestClient(app)
 
@@ -249,3 +253,142 @@ def test_job_analysis_webhook_no_request_body(mock_auth):
     # Assert: Verify validation error for missing request body
     assert response.status_code == 422
     assert "detail" in response.json()
+
+
+# ===== CALLBACK SIGNATURE VERIFICATION TESTS =====
+
+def test_verify_callback_signature_valid():
+    """Test callback signature verification with valid signature"""
+    # Arrange: Create test payload and generate signature
+    payload_data = {"job_id": "test-123",
+                    "status": "completed", "result": {"analyzed": True}}
+    payload_json = json.dumps(
+        payload_data, separators=(',', ':'), sort_keys=True)
+    secret = "test-webhook-secret"
+
+    signature = hmac.new(
+        secret.encode('utf-8'),
+        payload_json.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    signature_header = f"sha256={signature}"
+
+    # Act: Verify the signature
+    is_valid = verify_callback_signature(
+        payload_json, signature_header, secret)
+
+    # Assert: Signature should be valid
+    assert is_valid is True
+
+
+def test_verify_callback_signature_invalid():
+    """Test callback signature verification with invalid signature"""
+    # Arrange: Create test payload and generate signature with wrong secret
+    payload_data = {"job_id": "test-123", "status": "completed"}
+    payload_json = json.dumps(
+        payload_data, separators=(',', ':'), sort_keys=True)
+    correct_secret = "correct-secret"
+    wrong_secret = "wrong-secret"
+
+    signature = hmac.new(
+        wrong_secret.encode('utf-8'),
+        payload_json.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    signature_header = f"sha256={signature}"
+
+    # Act: Try to verify with correct secret (should fail)
+    is_valid = verify_callback_signature(
+        payload_json, signature_header, correct_secret)
+
+    # Assert: Signature should be invalid
+    assert is_valid is False
+
+
+def test_verify_callback_signature_malformed_header():
+    """Test callback signature verification with malformed signature header"""
+    # Arrange: Create test payload
+    payload_json = '{"job_id":"test-123"}'
+    secret = "test-secret"
+
+    # Act & Assert: Test various malformed signature headers
+    assert verify_callback_signature(payload_json, "", secret) is False
+    assert verify_callback_signature(payload_json, None, secret) is False
+    assert verify_callback_signature(
+        payload_json, "invalid-format", secret) is False
+    assert verify_callback_signature(
+        payload_json, "md5=invalid", secret) is False
+    assert verify_callback_signature(payload_json, "sha256=", secret) is False
+
+
+def test_verify_callback_signature_tampered_payload():
+    """Test callback signature verification with tampered payload"""
+    # Arrange: Create original payload and signature
+    original_payload = '{"job_id":"test-123","status":"completed"}'
+    tampered_payload = '{"job_id":"test-123","status":"failed"}'
+    secret = "test-secret"
+
+    signature = hmac.new(
+        secret.encode('utf-8'),
+        original_payload.encode('utf-8'),
+        hashlib.sha256
+    ).hexdigest()
+    signature_header = f"sha256={signature}"
+
+    # Act: Try to verify tampered payload with original signature
+    is_valid = verify_callback_signature(
+        tampered_payload, signature_header, secret)
+
+    # Assert: Should detect tampering
+    assert is_valid is False
+
+
+@patch('app.utils.llm_data_postprocessing.settings')
+@patch('httpx.AsyncClient.post')
+async def test_send_webhook_callback_with_signature(mock_post, mock_settings):
+    """Test that webhook callbacks include proper signatures"""
+    from app.utils.llm_data_postprocessing import send_webhook_callback
+
+    # Arrange: Mock settings and httpx
+    mock_settings.WEBHOOK_SECRET = "test-webhook-secret"
+    mock_settings.VERSION = "1.0.0"
+    mock_post.return_value.raise_for_status.return_value = None
+
+    # Act: Send callback
+    await send_webhook_callback("https://callback.example.com", "test-123", {"result": "data"}, "completed")
+
+    # Assert: Verify POST was called with signature headers
+    mock_post.assert_called_once()
+    call_args = mock_post.call_args
+
+    # Check that headers include signature
+    headers = call_args[1]['headers']
+    assert 'X-Webhook-Signature' in headers
+    assert headers['X-Webhook-Signature'].startswith('sha256=')
+    assert 'Content-Type' in headers
+    assert headers['Content-Type'] == 'application/json'
+
+
+@patch('app.utils.llm_data_postprocessing.settings')
+@patch('httpx.AsyncClient.post')
+async def test_send_webhook_callback_without_secret(mock_post, mock_settings):
+    """Test that webhook callbacks work without signature when no secret configured"""
+    from app.utils.llm_data_postprocessing import send_webhook_callback
+
+    # Arrange: Mock settings without webhook secret
+    mock_settings.WEBHOOK_SECRET = None
+    mock_settings.VERSION = "1.0.0"
+    mock_post.return_value.raise_for_status.return_value = None
+
+    # Act: Send callback
+    await send_webhook_callback("https://callback.example.com", "test-123", {"result": "data"}, "completed")
+
+    # Assert: Verify POST was called without signature headers
+    mock_post.assert_called_once()
+    call_args = mock_post.call_args
+
+    # Check that headers don't include signature
+    headers = call_args[1]['headers']
+    assert 'X-Webhook-Signature' not in headers
+    assert 'Content-Type' in headers
+    assert headers['Content-Type'] == 'application/json'

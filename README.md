@@ -80,6 +80,32 @@ job-analysis-fastapi
 - The application exposes a webhook endpoint for job analysis. You can send POST requests to the `/api/v1/webhooks` endpoint with job-related data.
 - Additional endpoints for managing job data can be found under `/api/v1/jobs`.
 
+### Webhook Security
+Both incoming webhook requests and outgoing callback responses use HMAC-SHA256 signatures for security:
+
+#### For Incoming Webhooks:
+- Include `X-Webhook-Signature: sha256={hash}` header
+- Hash is generated using the request payload and `WEBHOOK_SECRET`
+
+#### For Outgoing Callbacks:
+- When `async_processing=true` and a `callback_url` is provided, the service will send results to your callback URL
+- The callback includes `X-Webhook-Signature` header for verification
+- Use the provided `verify_callback_signature()` utility function to verify authenticity
+
+```python
+from app.utils.llm_data_postprocessing import verify_callback_signature
+
+# At your callback endpoint
+payload = request.body.decode('utf-8')  # Raw JSON string  
+signature = request.headers.get('X-Webhook-Signature')
+if verify_callback_signature(payload, signature, 'your-webhook-secret'):
+    # Process callback safely
+    data = json.loads(payload)
+else:
+    # Reject invalid callback
+    return 401
+```
+
 ## Testing
 - To run the tests, use the following command:
   ```bash

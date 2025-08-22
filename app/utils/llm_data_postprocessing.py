@@ -1,9 +1,13 @@
+from typing import Optional
 from datetime import datetime
 import json
 import re
+import hmac
+import hashlib
 from fastapi import HTTPException
 import httpx
 from app.utils.logging import get_logger
+from app.core.config import settings
 
 logger = get_logger(__name__)
 
@@ -50,7 +54,10 @@ def post_process_llm_output(llm_output: str):
 
 
 async def send_webhook_callback(callback_url: str, job_id: str, result: dict, status: str):
-    """Send analysis results to callback URL with JobAnalysisResponse structure"""
+    """
+    Send analysis results to callback URL with JobAnalysisResponse structure.
+    Includes HMAC-SHA256 signature for security verification.
+    """
     try:
         # Create payload matching JobAnalysisResponse structure
         payload = {
@@ -65,9 +72,82 @@ async def send_webhook_callback(callback_url: str, job_id: str, result: dict, st
             "timestamp": datetime.utcnow().isoformat()
         }
 
+        # Convert payload to JSON string for consistent hashing
+        payload_json = json.dumps(
+            payload, separators=(',', ':'), sort_keys=True)
+
+        # Prepare headers
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": f"JobAnalysisWebhook/{settings.VERSION}"
+        }
+
+        # Add signature if webhook secret is configured
+        if settings.WEBHOOK_SECRET:
+            signature = hmac.new(
+                settings.WEBHOOK_SECRET.encode('utf-8'),
+                payload_json.encode('utf-8'),
+                hashlib.sha256
+            ).hexdigest()
+            headers["X-Webhook-Signature"] = f"sha256={signature}"
+            logger.debug(
+                f"Added webhook signature for callback to {callback_url}")
+        else:
+            logger.warning(
+                "No WEBHOOK_SECRET configured - callback sent without signature")
+
         async with httpx.AsyncClient(timeout=30.0) as client:
-            response = await client.post(callback_url, json=payload)
+            response = await client.post(
+                callback_url,
+                data=payload_json,  # Send as raw JSON string to match signature
+                headers=headers
+            )
             response.raise_for_status()
-            logger.info(f"Webhook sent successfully for job_id: {job_id}")
+            logger.info(
+                f"Webhook callback sent successfully for job_id: {job_id}")
     except Exception as e:
-        logger.error(f"Failed to send webhook for job_id {job_id}: {str(e)}")
+        logger.error(
+            f"Failed to send webhook callback for job_id {job_id}: {str(e)}")
+
+
+def verify_callback_signature(payload: str, signature: Optional[str] = None, secret: Optional[str] = None) -> bool:
+    """
+    Verify HMAC-SHA256 signature for callback webhook payloads.
+
+    This utility function can be used by callback receivers to verify
+    that the callback payload came from this job analysis service.
+
+    Args:
+        payload: Raw JSON payload as string
+        signature: Signature from X-Webhook-Signature header (format: "sha256=...")
+        secret: Webhook secret key (should match WEBHOOK_SECRET)
+
+    Returns:
+        bool: True if signature is valid, False otherwise
+
+    Example usage at callback receiver:
+        payload = request.body.decode('utf-8')  # Raw JSON string
+        signature = request.headers.get('X-Webhook-Signature')
+        if verify_callback_signature(payload, signature, 'your-webhook-secret'):
+            # Process callback safely
+            data = json.loads(payload)
+        else:
+            # Reject invalid callback
+            return 401
+    """
+    if not signature or not signature.startswith("sha256=") or not secret:
+        return False
+
+    try:
+        expected_signature = hmac.new(
+            secret.encode('utf-8'),
+            payload.encode('utf-8'),
+            hashlib.sha256
+        ).hexdigest()
+
+        # Extract hash from "sha256=..." format
+        received_hash = signature[7:]  # Remove "sha256=" prefix
+
+        return hmac.compare_digest(expected_signature, received_hash)
+    except Exception:
+        return False
